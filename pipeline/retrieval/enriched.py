@@ -33,20 +33,16 @@ Re-seeding the enriched collection (~3-5 min for the full corpus,
 
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-# Load .env from the repo root so API keys are always available,
-# regardless of which directory the script is invoked from.
-_ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
-load_dotenv(_ENV_PATH)
-
 import anthropic
 import chromadb
 
 from pipeline.embeddings.embed import embed_texts
 from pipeline.ingestion.store import get_collection, CHROMA_PATH
 
-client = anthropic.Anthropic()
+
+def _get_client():
+    """Lazy Anthropic client — instantiated on first call, after env keys are set."""
+    return anthropic.Anthropic()
 
 ENRICHED_COLLECTION = "northbrook_enriched"
 
@@ -56,6 +52,15 @@ ENRICHED_COLLECTION = "northbrook_enriched"
 # larger collection and higher seeding cost.
 # -----------------------------------------------------------------------
 N_QUESTIONS_PER_CHUNK = 3
+
+
+def _get_enriched_collection(collection_name: str = ENRICHED_COLLECTION) -> chromadb.Collection:
+    """Get or create the enriched ChromaDB collection."""
+    db = chromadb.PersistentClient(path=CHROMA_PATH)
+    return db.get_or_create_collection(
+        name=collection_name,
+        metadata={"hnsw:space": "cosine"},
+    )
 
 
 def generate_questions_for_chunk(
@@ -82,6 +87,7 @@ def generate_questions_for_chunk(
     # employee would ask" vs "ask questions a compliance auditor would
     # ask") to bias retrieval toward their target audience.
     # ------------------------------------------------------------------
+    client = _get_client()
     message = client.messages.create(
         model="claude-sonnet-4-5",
         max_tokens=256,
@@ -224,9 +230,8 @@ def enriched_retrieve(
         RuntimeError: If the collection is empty (enrichment has not
                       been run yet).
     """
-    collection = get_collection(collection_name)
+    collection = _get_enriched_collection(collection_name)
 
-    # Guard: fail fast if the collection hasn't been seeded yet
     if collection.count() == 0:
         raise RuntimeError(
             f"Collection '{collection_name}' is empty. "
@@ -269,3 +274,4 @@ def enriched_retrieve(
     sources = sorted(best_per_chunk.values(), key=lambda s: s["score"], reverse=True)
 
     return sources[:top_k]
+

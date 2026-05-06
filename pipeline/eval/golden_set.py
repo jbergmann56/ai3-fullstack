@@ -365,11 +365,53 @@ GOLDEN_SET = [
             },
         ],
     },
+
+    # 16. Follow-up pronoun resolution (tests query rewriting under RRF)
+    {
+        "id": "sick_days_followup",
+        "question": "Are those sick days unlimited or capped?",
+        "expected_answer": (
+            "Northbrook offers unlimited sick days as part of its PTO policy. "
+            "There is no annual cap on sick leave usage."
+        ),
+        "expected_source": ["vacation_policy_2025.md"],
+        "category": "policy_lookup",
+        "difficulty": "hard",
+        "history": [],
+    },
+
+    # 17. Out-of-scope refusal (tests hardened system prompt)
+    {
+        "id": "stock_price",
+        "question": "What is Northbrook's current stock price?",
+        "expected_answer": (
+            "This information is not available in the Northbrook documents provided."
+        ),
+        "expected_source": [],
+        "category": "out_of_scope",
+        "difficulty": "easy",
+        "history": [],
+    },
+
+    # 18. Cross-doc compound (tests RRF multi-doc recall)
+    {
+        "id": "project_meridian",
+        "question": "What is Project Meridian and how much has been budgeted for it?",
+        "expected_answer": (
+            "Project Meridian is an AI-First Services initiative approved by the board "
+            "with a $2.1M investment. It is one of CEO Sarah Chen's top 2025 priorities "
+            "and was confirmed at the Q4 board meeting."
+        ),
+        "expected_source": ["board_meeting_q4_2024.md", "memo_ceo_annual_kickoff.md"],
+        "category": "compound",
+        "difficulty": "medium",
+        "history": [],
+    },
 ]
 
 
 # Quick sanity checks — also useful for students to explore
-assert len(GOLDEN_SET) == 15, "Golden set must have exactly 15 queries (10 single-turn + 5 multi-turn)"
+assert len(GOLDEN_SET) == 18, "Golden set must have exactly 18 queries (15 base + 3 Lab 2 additions)"
 assert all("expected_answer" in q for q in GOLDEN_SET), "Every query needs an expected answer"
 assert all(isinstance(q["expected_source"], list) for q in GOLDEN_SET), \
     "expected_source must be a list (even if it has one element)"

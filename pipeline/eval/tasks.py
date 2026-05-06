@@ -190,6 +190,23 @@ def hyde_task(input: dict) -> dict:
     return {"question": question, **result}
 
 
+def rrf_task(input: dict) -> dict:
+    """Run the RRF RAG pipeline on one dataset example.
+
+    Fuses naive_retrieve and enriched_retrieve ranked lists via
+    Reciprocal Rank Fusion (k=60). Chunks confirmed by both strategies
+    score higher than those appearing in only one list.
+
+    Requires the enriched collection to be seeded first.
+    See pipeline/retrieval/rrf.py for the seed command.
+    """
+    from pipeline.retrieval.rrf import rrf_retrieve
+
+    question = input["question"]
+    result = _run_pipeline(question, rrf_retrieve)
+    return {"question": question, **result}
+
+
 # ─── SESSION 2.2 CONTEXT-MANAGEMENT EXPERIMENTS ─────────────────────────
 # Three task variants that toggle contextualize_query and assemble_context
 # independently. All three use naive_retrieve; the differences are isolated

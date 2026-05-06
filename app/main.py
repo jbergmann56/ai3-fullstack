@@ -22,57 +22,98 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
+# pysqlite3 shim — required for ChromaDB on Streamlit Community Cloud.
+# Community Cloud's system sqlite3 is older than ChromaDB requires.
+# pysqlite3-binary ships a newer sqlite3; we swap it in before chromadb imports.
+# Local Mac dev skips this gracefully (pysqlite3 not installed).
+try:
+    __import__('pysqlite3')
+    import sys
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+except ImportError:
+    pass
+
+import os
+import uuid
+
 import streamlit as st
 import yaml
+from dotenv import load_dotenv
+
 from app.branding import apply_branding
+from app.feedback import get_feedback_summary, submit_feedback
 from app.rag import get_response
 
-# ============================================================
-# DEPLOYMENT TODO (Session 4.1)
-# ============================================================
-# When deploying to Streamlit Community Cloud, API keys must NOT
-# be stored in secrets — anyone with the URL could burn your credits.
-# Instead, add a sidebar input that lets each visitor enter their own key:
-#
-#   api_key = st.sidebar.text_input("Anthropic API Key", type="password")
-#   if not api_key:
-#       st.warning("Enter your Anthropic API key to start chatting.")
-#       st.stop()
-#
-# Pass the key to your pipeline (e.g., via st.session_state).
-# See DR-017 for the full pattern.
-# ============================================================
+load_dotenv(_PROJECT_ROOT / ".env")
 
 # ============================================================
 # LOAD CONFIG & APPLY BRANDING
+# st.set_page_config() is inside apply_branding() and MUST be
+# the first st.* call — keep this block above everything else.
 # ============================================================
 with open(_PROJECT_ROOT / "student_config.yaml") as f:
     config = yaml.safe_load(f)
 
 apply_branding(config)
 
+# ==============================================================
+# === DEPLOYMENT: API KEYS ===
+# Per-visitor key entry. No keys baked into the deployed app —
+# anyone with the URL would burn the owner's credits.
+# Keys live in os.environ for this session only — lost on refresh.
+# ==============================================================
+with st.sidebar:
+    st.subheader("API Keys")
+    anthropic_key = st.text_input(
+        "Anthropic API Key",
+        type="password",
+        value=os.getenv("ANTHROPIC_API_KEY", ""),
+        help="Get one at console.anthropic.com",
+    )
+    voyage_key = st.text_input(
+        "Voyage API Key",
+        type="password",
+        value=os.getenv("VOYAGE_API_KEY", ""),
+        help="Get one at voyageai.com",
+    )
+
+if not anthropic_key or not voyage_key:
+    st.warning("Enter both API keys in the sidebar to start chatting.")
+    st.stop()
+
+os.environ["ANTHROPIC_API_KEY"] = anthropic_key
+os.environ["VOYAGE_API_KEY"] = voyage_key
+# === END DEPLOYMENT ===
+
+# Initialize Phoenix tracing ONCE per session
+if "phoenix_initialized" not in st.session_state:
+    try:
+        from phoenix.otel import register
+        register(
+            project_name=os.getenv("PHOENIX_PROJECT_NAME", "ai3"),
+            auto_instrument=True,
+        )
+    except Exception:
+        pass
+    st.session_state.phoenix_initialized = True
+
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+
 # ============================================================
 # STEP 1: Initialize Session State
 # ============================================================
-# TODO: Initialize three session state keys using the guard pattern:
-#
-#   "messages"      -> empty list []
-#                      (current conversation's message history)
-#
-#   "conversations" -> empty dict {}
-#                      (all conversations, keyed by chat_id)
-#
-#   "current_chat"  -> None
-#                      (ID of the active conversation)
-#
-# Use: if "key" not in st.session_state:
-#          st.session_state.key = value
-#
-# Then: auto-create the first conversation if current_chat is None:
-#   if st.session_state.current_chat is None:
-#       chat_id = "chat_0"
-#       st.session_state.current_chat = chat_id
-#       st.session_state.conversations[chat_id] = []
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "conversations" not in st.session_state:
+    st.session_state.conversations = {}
+if "current_chat" not in st.session_state:
+    st.session_state.current_chat = None
+
+if st.session_state.current_chat is None:
+    chat_id = "chat_0"
+    st.session_state.current_chat = chat_id
+    st.session_state.conversations[chat_id] = []
 # ============================================================
 
 
@@ -125,6 +166,13 @@ with st.sidebar:
     msg_count = len(st.session_state.get("messages", []))
     st.write(f"Messages: {msg_count}")
 
+    summary = get_feedback_summary()
+    if summary["total"] > 0:
+        st.write(
+            f"Feedback: {summary['positive']} :thumbsup: / "
+            f"{summary['negative']} :thumbsdown:"
+        )
+
     if st.button("Clear Chat"):
         st.session_state.messages = []
         if st.session_state.current_chat:
@@ -144,10 +192,63 @@ if not st.session_state.get("messages"):
     with st.chat_message("assistant"):
         st.markdown(welcome)
 
+# Feedback callbacks
+def _save_feedback(index):
+    feedback_value = st.session_state[f"fb_{index}"]
+    st.session_state.messages[index]["feedback"] = feedback_value
+    span_id = st.session_state.messages[index].get("span_id", "")
+    if span_id:
+        submit_feedback(span_id, feedback_value)
+    st.session_state.conversations[st.session_state.current_chat] = (
+        st.session_state.messages.copy()
+    )
+    st.toast("Thanks for the positive feedback!" if feedback_value == 1
+             else "Thanks — you can add details below.")
+
+
+def _save_feedback_note(index):
+    note = st.session_state.get(f"note_{index}", "")
+    if not note:
+        return
+    span_id = st.session_state.messages[index].get("span_id", "")
+    if span_id:
+        submit_feedback(span_id, 0, note=note)
+    st.session_state.messages[index]["feedback_note"] = note
+    st.session_state.conversations[st.session_state.current_chat] = (
+        st.session_state.messages.copy()
+    )
+    st.toast("Detailed feedback submitted!")
+
+
+def render_feedback(index):
+    message     = st.session_state.messages[index]
+    existing_fb = message.get("feedback", None)
+    st.session_state[f"fb_{index}"] = existing_fb
+    st.feedback(
+        "thumbs",
+        key=f"fb_{index}",
+        disabled=existing_fb is not None,
+        on_change=_save_feedback,
+        args=[index],
+    )
+    if existing_fb == 0 and not message.get("feedback_note"):
+        st.text_input(
+            "What went wrong?",
+            key=f"note_{index}",
+            placeholder="Help us improve (press Enter to submit)",
+            on_change=_save_feedback_note,
+            args=[index],
+        )
+    elif message.get("feedback_note"):
+        st.caption(f"Your note: _{message['feedback_note']}_")
+
+
 # Display all previous messages
-for message in st.session_state.get("messages", []):
+for i, message in enumerate(st.session_state.get("messages", [])):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        if message["role"] == "assistant":
+            render_feedback(i)
 
 
 # ============================================================
@@ -169,42 +270,33 @@ def display_sources(sources: list[dict]):
 # ============================================================
 # STEP 5: Chat Input Handler
 # ============================================================
-# TODO: Implement the chat input handler
-#
-# Use: if prompt := st.chat_input("Ask a question..."):
-#
-# Inside the block:
-#   a. Append the user message to st.session_state.messages
-#      Format: {"role": "user", "content": prompt}
-#   b. Display the user message with:
-#      with st.chat_message("user"):
-#          st.markdown(prompt)
-#   c. Call get_response(prompt, st.session_state.messages) to get a response
-#      response.answer = the text reply
-#      response.sources = list of source dicts (may be empty)
-#   d. Display the assistant message with:
-#      with st.chat_message("assistant"):
-#          st.markdown(response.answer)
-#          display_sources(response.sources)
-#   e. Append the assistant message to st.session_state.messages
-#      Format: {"role": "assistant", "content": response.answer}
-#   f. Save the conversation:
-#      st.session_state.conversations[st.session_state.current_chat] = (
-#          st.session_state.messages.copy()
-#      )
-# ============================================================
 if prompt := st.chat_input("Ask a question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    response = get_response(prompt, st.session_state.messages)
+    try:
+        from openinference.instrumentation import using_attributes
+        with using_attributes(
+            session_id=st.session_state.session_id,
+            user_id="student",
+            tags=["streamlit"],
+        ):
+            response = get_response(prompt, st.session_state.messages)
+    except ImportError:
+        response = get_response(prompt, st.session_state.messages)
+
+    st.session_state.messages.append({
+        "role":    "assistant",
+        "content": response.answer,
+        "span_id": response.span_id,
+    })
+    st.session_state.conversations[st.session_state.current_chat] = (
+        st.session_state.messages.copy()
+    )
 
     with st.chat_message("assistant"):
         st.markdown(response.answer)
         display_sources(response.sources)
-
-    st.session_state.messages.append({"role": "assistant", "content": response.answer})
-    st.session_state.conversations[st.session_state.current_chat] = (
-        st.session_state.messages.copy()
-    )
+        render_feedback(len(st.session_state.messages) - 1)
+# ============================================================
