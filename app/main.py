@@ -46,6 +46,16 @@ from app.rag import get_response
 
 load_dotenv(_PROJECT_ROOT / ".env")
 
+# ============================================================
+# LOAD CONFIG & APPLY BRANDING
+# st.set_page_config() is inside apply_branding() and MUST be
+# the first st.* call — keep this block above everything else.
+# ============================================================
+with open(_PROJECT_ROOT / "student_config.yaml") as f:
+    config = yaml.safe_load(f)
+
+apply_branding(config)
+
 # ==============================================================
 # === DEPLOYMENT: API KEYS ===
 # Per-visitor key entry. No keys baked into the deployed app —
@@ -74,14 +84,6 @@ if not anthropic_key or not voyage_key:
 os.environ["ANTHROPIC_API_KEY"] = anthropic_key
 os.environ["VOYAGE_API_KEY"] = voyage_key
 # === END DEPLOYMENT ===
-
-# ============================================================
-# LOAD CONFIG & APPLY BRANDING
-# ============================================================
-with open(_PROJECT_ROOT / "student_config.yaml") as f:
-    config = yaml.safe_load(f)
-
-apply_branding(config)
 
 # Initialize Phoenix tracing ONCE per session
 if "phoenix_initialized" not in st.session_state:
@@ -298,18 +300,3 @@ if prompt := st.chat_input("Ask a question..."):
         display_sources(response.sources)
         render_feedback(len(st.session_state.messages) - 1)
 # ============================================================
-if prompt := st.chat_input("Ask a question..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    response = get_response(prompt, st.session_state.messages)
-
-    with st.chat_message("assistant"):
-        st.markdown(response.answer)
-        display_sources(response.sources)
-
-    st.session_state.messages.append({"role": "assistant", "content": response.answer})
-    st.session_state.conversations[st.session_state.current_chat] = (
-        st.session_state.messages.copy()
-    )
